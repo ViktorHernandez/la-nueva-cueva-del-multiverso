@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useState, useEffect } from "react";
 import { useAuth } from "../context/AuthContext";
 import AuthModal from "./AuthModal";
 import CartModal from "./CartModal";
@@ -16,6 +16,31 @@ export default function Header() {
 
   const cartCount = cart.reduce((s, i) => s + i.quantity, 0);
   const unreadCount = notifications.filter((n) => !n.read).length;
+
+  useEffect(() => {
+    const initTranslate = () => {
+      if (window.google && window.google.translate) {
+        try {
+          new window.google.translate.TranslateElement(
+            { pageLanguage: "es", autoDisplay: false },
+            "google_translate_element"
+          );
+        } catch (e) {}
+      }
+    };
+
+    if (window.google && window.google.translate) {
+      initTranslate();
+    } else {
+      const interval = setInterval(() => {
+        if (window.google && window.google.translate) {
+          initTranslate();
+          clearInterval(interval);
+        }
+      }, 300);
+      return () => clearInterval(interval);
+    }
+  }, []);
 
   return (
     <>
