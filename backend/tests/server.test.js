@@ -417,3 +417,212 @@ describe("Accesibilidad", () => {
     expect(res.body.colorFilter).toBe("protanopia");
   });
 });
+describe("Seguridad - Inyección NoSQL", () => {
+  test("POST /api/users/login debe rechazar intento de NoSQL injection en email", async () => {
+    const res = await request(app)
+      .post("/api/users/login")
+      .send({ email: { "$gt": "" }, password: "cualquier_cosa" });
+    expect([400, 401, 500]).toContain(res.statusCode);
+    expect(res.body).not.toHaveProperty("token");
+  });
+
+  test("POST /api/users/login debe rechazar intento de NoSQL injection en password", async () => {
+    await request(app).post("/api/users/register").send({
+      name: "Victima Test",
+      email: "victima@test.com",
+      phone: "1234567890",
+      password: "password_real",
+      registrationDate: "01/03/2026",
+      registrationTime: "10:00:00",
+    });
+    const res = await request(app)
+      .post("/api/users/login")
+      .send({ email: "victima@test.com", password: { "$gt": "" } });
+    expect([400, 401, 500]).toContain(res.statusCode);
+    expect(res.body).not.toHaveProperty("token");
+  });
+
+  test("POST /api/users/register debe rechazar email con operadores MongoDB", async () => {
+    const res = await request(app)
+      .post("/api/users/register")
+      .send({
+        name: "Atacante",
+        email: { "$ne": null },
+        phone: "1234567890",
+        password: "password123",
+        registrationDate: "01/03/2026",
+        registrationTime: "10:00:00",
+      });
+    expect([400, 500]).toContain(res.statusCode);
+    expect(res.body).not.toHaveProperty("token");
+  });
+});
+
+describe("Seguridad - Autorización y Control de Acceso", () => {
+  let userToken;
+  let adminToken;
+
+  beforeEach(async () => {
+    await request(app).post("/api/users/register").send({
+      name: "Usuario Normal",
+      email: "normal@test.com",
+      phone: "1234567890",
+      password: "password123",
+      registrationDate: "01/03/2026",
+      registrationTime: "10:00:00",
+    });
+    const loginUser = await request(app)
+      .post("/api/users/login")
+      .send({ email: "normal@test.com", password: "password123" });
+    userToken = loginUser.body.token;
+
+    await request(app).post("/api/users/register").send({
+      name: "Admin Test",
+      email: "admin2@test.com",
+      phone: "9876543210",
+      password: "admin123",
+      registrationDate: "01/03/2026",
+      registrationTime: "10:00:00",
+    });
+    const { Usuario } = require("../models");
+    await Usuario.findOneAndUpdate({ email: "admin2@test.com" }, { type: "admin" });
+    const loginAdmin = await request(app)
+      .post("/api/users/login")
+      .send({ email: "admin2@test.com", password: "admin123" });
+    adminToken = loginAdmin.body.token;
+  });
+
+  test("Usuario normal no puede acceder a rutas de administrador (GET /api/users)", async () => {
+    const res = await request(app)
+      .get("/api/users")
+      .set("Authorization", `Bearer ${userToken}`);
+    expect(res.statusCode).toBe(403);
+    expect(res.body).toHaveProperty("error");
+  });
+
+  test("Usuario normal no puede crear productos (POST /api/products)", async () => {
+    const res = await request(app)
+      .post("/api/products")
+      .set("Authorization", `Bearer ${userToken}`)
+      .send({ title: "Producto Malicioso", category: "anime", price: "$0", seller: "Hacker", image: "hack.png", description: "desc" });
+    expect(res.statusCode).toBe(403);
+    expect(res.body).toHaveProperty("error");
+  });
+
+  test("Usuario normal no puede eliminar productos (DELETE /api/products/:id)", async () => {
+    const { Categoria, Producto } = require("../models");
+    const cat = await Categoria.create({ nombre: "anime", emoji: "🍥" });
+    const prod = await Producto.create({ title: "Producto Test", description: "desc", categoriaId: cat._id, price: "$100", seller: "Tienda", image: "test.png" });
+    const res = await request(app)
+      .delete(`/api/products/${prod._id}`)
+      .set("Authorization", `Bearer ${userToken}`);
+    expect(res.statusCode).toBe(403);
+  });
+
+  test("Usuario normal no puede eliminar otros usuarios (DELETE /api/users/:email)", async () => {
+    const res = await request(app)
+      .delete("/api/users/admin2@test.com")
+      .set("Authorization", `Bearer ${userToken}`);
+    expect(res.statusCode).toBe(403);
+  });
+
+  test("Petición sin token no puede acceder a rutas protegidas (GET /api/cart)", async () => {
+    const res = await request(app).get("/api/cart");
+    expect(res.statusCode).toBe(401);
+  });
+
+  test("Token manipulado/falso es rechazado", async () => {
+    const tokenFalso = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpZCI6IjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2IiwiZW1haWwiOiJoYWNrZXJAdGVzdC5jb20iLCJ0eXBlIjoiYWRtaW4ifQ.firma_falsa_aqui";
+    const res = await request(app)
+      .get("/api/users")
+      .set("Authorization", `Bearer ${tokenFalso}`);
+    expect(res.statusCode).toBe(403);
+  });
+});
+
+describe("Seguridad - XSS e Inyección en Campos de Texto", () => {
+  test("POST /api/contacts debe aceptar pero no ejecutar scripts en mensaje", async () => {
+    const res = await request(app)
+      .post("/api/contacts")
+      .send({
+        nombre: "<script>alert('xss')</script>",
+        correo: "xss@test.com",
+        mensaje: "<img src=x onerror=alert('xss')>",
+        fecha: "01/03/2026",
+        hora: "10:00",
+      });
+    expect([201, 400]).toContain(res.statusCode);
+    if (res.statusCode === 201) {
+      expect(res.body.nombre).toBeDefined();
+      expect(typeof res.body.nombre).toBe("string");
+    }
+  });
+
+  test("POST /api/users/register debe manejar caracteres especiales sin romper el servidor", async () => {
+    const res = await request(app)
+      .post("/api/users/register")
+      .send({
+        name: "'; DROP TABLE users; --",
+        email: "sqltest@test.com",
+        phone: "1234567890",
+        password: "password123",
+        registrationDate: "01/03/2026",
+        registrationTime: "10:00:00",
+      });
+    expect([201, 400]).toContain(res.statusCode);
+    expect(res.statusCode).not.toBe(500);
+  });
+});
+
+describe("Seguridad - Exposición de Datos Sensibles", () => {
+  test("El registro no debe devolver la contraseña en la respuesta", async () => {
+    const res = await request(app)
+      .post("/api/users/register")
+      .send({
+        name: "Test Privacidad",
+        email: "privacidad@test.com",
+        phone: "1234567890",
+        password: "mi_password_secreto",
+        registrationDate: "01/03/2026",
+        registrationTime: "10:00:00",
+      });
+    expect(res.statusCode).toBe(201);
+    expect(res.body.user).not.toHaveProperty("password");
+  });
+
+  test("El login no debe devolver la contraseña en la respuesta", async () => {
+    await request(app).post("/api/users/register").send({
+      name: "Test Login",
+      email: "logintest@test.com",
+      phone: "1234567890",
+      password: "mi_password_secreto",
+      registrationDate: "01/03/2026",
+      registrationTime: "10:00:00",
+    });
+    const res = await request(app)
+      .post("/api/users/login")
+      .send({ email: "logintest@test.com", password: "mi_password_secreto" });
+    expect(res.statusCode).toBe(200);
+    expect(res.body.user).not.toHaveProperty("password");
+  });
+
+  test("GET /api/users/profile no debe exponer la contraseña", async () => {
+    await request(app).post("/api/users/register").send({
+      name: "Test Perfil",
+      email: "perfil@test.com",
+      phone: "1234567890",
+      password: "password_privado",
+      registrationDate: "01/03/2026",
+      registrationTime: "10:00:00",
+    });
+    const loginRes = await request(app)
+      .post("/api/users/login")
+      .send({ email: "perfil@test.com", password: "password_privado" });
+    const token = loginRes.body.token;
+    const res = await request(app)
+      .get("/api/users/profile")
+      .set("Authorization", `Bearer ${token}`);
+    expect(res.statusCode).toBe(200);
+    expect(res.body).not.toHaveProperty("password");
+  });
+});
